@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "ptouch-decode",
+    "ptouch-encode",
+]
+resolver = "2"
