@@ -1,13 +1,33 @@
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
+use std::num::ParseIntError;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::str::FromStr;
 
 use clap::Parser;
 use png;
 
 
 const ESC: u8 = 0x1B;
+
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum CutEvery {
+    Unsupported,
+    Every(u8),
+}
+impl FromStr for CutEvery {
+    type Err = ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() == 0 {
+            Ok(Self::Unsupported)
+        } else {
+            let every = s.parse()?;
+            Ok(Self::Every(every))
+        }
+    }
+}
 
 
 #[derive(Parser)]
@@ -37,7 +57,7 @@ struct Opts {
     pub dont_clear_print_buffer: bool,
 
     #[arg(short = 'e', long, default_value = "0")]
-    pub cut_every: u8,
+    pub cut_every: CutEvery,
 
     #[arg(short = 'f', long, default_value = "0")]
     pub feed: u16,
@@ -243,8 +263,10 @@ fn main() -> ExitCode {
     out_buffy.write_all(&[ESC, b'i', b'K', setting_byte])
         .expect("failed to write settings");
 
-    out_buffy.write_all(&[ESC, b'i', b'A', opts.cut_every])
+if let CutEvery::Every(cut_every) = opts.cut_every {
+    out_buffy.write_all(&[ESC, b'i', b'A', cut_every])
         .expect("failed to write cut-every setting");
+}
 
     let feed_buf = opts.feed.to_le_bytes();
     out_buffy.write_all(&[ESC, b'i', b'd', feed_buf[0], feed_buf[1]])
