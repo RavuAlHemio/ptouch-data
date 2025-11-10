@@ -224,9 +224,9 @@ fn main() -> ExitCode {
         .expect("failed to create output file");
     let mut out_buffy = BufWriter::new(&mut out_file);
 
-    // 200 bytes invalidate
+    // 350 bytes invalidate
     let buf = [0u8; 10];
-    for _ in 0..(200/10) {
+    for _ in 0..(350/10) {
         out_buffy.write_all(&buf)
             .expect("failed to write invalidate bytes");
     }
