@@ -65,6 +65,9 @@ struct Opts {
     #[arg(short = 'w', long)]
     pub width_mm: u8,
 
+    #[arg(short = 'x', long, default_value = "0")]
+    pub extend_to_width_px: u16,
+
     #[arg(
         short = '2',
         long,
@@ -156,6 +159,74 @@ fn pack_bits(bytes: &[u8]) -> Vec<u8> {
     ret
 }
 
+trait ByteIteratorExt where Self : Iterator<Item = u8> + Sized {
+    fn bits_msb_first(self) -> BytesToBitsMsbFirst<Self>;
+}
+impl<I: Iterator<Item = u8>> ByteIteratorExt for I {
+    fn bits_msb_first(self) -> BytesToBitsMsbFirst<Self> {
+        BytesToBitsMsbFirst {
+            inner: self,
+            current_byte: 0,
+            current_bit: 0,
+        }
+    }
+}
+
+struct BytesToBitsMsbFirst<I: Iterator<Item = u8>> {
+    inner: I,
+    current_byte: u8,
+    current_bit: u8,
+}
+impl<I: Iterator<Item = u8>> Iterator for BytesToBitsMsbFirst<I> {
+    type Item = bool;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_bit == 0 {
+            // pull the next byte (or fall out)
+            self.current_byte = self.inner.next()?;
+        }
+
+        // extract the next bit
+        let ret = (self.current_byte & (1 << (7 - self.current_bit))) != 0;
+        self.current_bit = (self.current_bit + 1) % 8;
+        Some(ret)
+    }
+}
+
+trait BitIteratorExt where Self : Iterator<Item = bool> + Sized {
+    fn bytes_msb_first(self) -> BitsToBytesMsbFirst<Self>;
+}
+impl<I: Iterator<Item = bool>> BitIteratorExt for I {
+    fn bytes_msb_first(self) -> BitsToBytesMsbFirst<Self> {
+        BitsToBytesMsbFirst {
+            inner: self,
+        }
+    }
+}
+
+struct BitsToBytesMsbFirst<I: Iterator<Item = bool>> {
+    inner: I,
+}
+impl<I: Iterator<Item = bool>> Iterator for BitsToBytesMsbFirst<I> {
+    type Item = u8;
+    fn next(&mut self) -> Option<Self::Item> {
+        let first_bit = self.inner.next()?;
+
+        let mut current_byte = 0;
+        if first_bit {
+            current_byte |= 1 << 7;
+        }
+
+        for i in (0..7).rev() {
+            let Some(next_bit) = self.inner.next() else { break };
+            if next_bit {
+                current_byte |= 1 << i;
+            }
+        }
+        Some(current_byte)
+    }
+}
+
+
 fn main() -> ExitCode {
     let opts = Opts::parse();
     if opts.png_paths.len() == 0 {
@@ -181,6 +252,32 @@ fn main() -> ExitCode {
         if reader.info().bit_depth != png::BitDepth::One {
             panic!("PNG bit depth is not 1");
         }
+        let flip_bits = match reader.info().color_type {
+            png::ColorType::Grayscale => {
+                // PNG: 1 = white, 0 = black
+                // P-Touch: 0 = no marker, 1 = marker
+                // => flip
+                true
+            },
+            png::ColorType::Indexed => {
+                let palette = reader.info().palette.as_ref()
+                    .expect("image does not have a palette");
+                if palette.len() != 6 {
+                    panic!("image's palette has {} entries; expected 6 (2xRGB)", palette.len());
+                }
+                if &**palette == &[0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF] {
+                    // same as grayscale; flip
+                    true
+                } else if &**palette == &[0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00] {
+                    // pre-flipped
+                    false
+                } else {
+                    panic!("image's palette contains other colors than full black and full white");
+                }
+            },
+            ct => panic!("image has invalid color type {:?}", ct),
+        };
+
         let mut rows = Vec::new();
         loop {
             let ols = reader.output_line_size(width.unwrap())
@@ -192,23 +289,47 @@ fn main() -> ExitCode {
                 break;
             }
 
-            // flip the bits
-            // (PNG: 1 (white) = no marker, 0 (black) = marker;
-            //  P-Touch: 0 = no marker, 1 = marker)
-            // but flip only those that are valid
-            let mut remaining_width = width.unwrap();
-            for b in &mut buf {
-                let this_bits = remaining_width.min(8);
-                for i in 0..this_bits {
-                    *b ^= 1 << ((8 - 1) - i);
-                }
-                remaining_width -= this_bits;
-            }
+            let width_usize: usize = width.unwrap().try_into().unwrap();
+            let extend_to_usize: usize = opts.extend_to_width_px.into();
+            let (extend_front, extend_rear) = if extend_to_usize > width_usize {
+                let total_extend = extend_to_usize - width_usize;
+                let extend_front = total_extend / 2;
+                let extend_back = if total_extend % 2 == 0 {
+                    extend_front
+                } else {
+                    extend_front + 1
+                };
+                (extend_front, extend_back)
+            } else {
+                (0, 0)
+            };
 
-            if buf.iter().all(|b| *b == 0x00) {
+            // create the padding pixels
+            let front_extension_bits = std::iter::repeat_n(false, extend_front);
+            let rear_extension_bits = std::iter::repeat_n(false, extend_rear);
+
+            let flipped_bits = buf
+                // turn the row into bits
+                .iter()
+                .copied()
+                .bits_msb_first()
+                // take only what you need from it
+                .take(width_usize)
+                // flip if necessary
+                .map(|bit| if flip_bits { !bit } else { bit });
+
+            let complete_bits = front_extension_bits
+                .chain(flipped_bits)
+                .chain(rear_extension_bits);
+
+            let complete_bytes: Vec<u8> = complete_bits
+                .bytes_msb_first()
+                .collect();
+
+            if complete_bytes.iter().all(|b| *b == 0x00) {
                 rows.push(vec![]);
             } else {
-                let packed = pack_bits(&buf);
+                let packed = pack_bits(&complete_bytes);
                 rows.push(packed);
             }
         }
@@ -273,10 +394,10 @@ fn main() -> ExitCode {
     out_buffy.write_all(&[ESC, b'i', b'K', setting_byte])
         .expect("failed to write settings");
 
-if let CutEvery::Every(cut_every) = opts.cut_every {
-    out_buffy.write_all(&[ESC, b'i', b'A', cut_every])
-        .expect("failed to write cut-every setting");
-}
+    if let CutEvery::Every(cut_every) = opts.cut_every {
+        out_buffy.write_all(&[ESC, b'i', b'A', cut_every])
+            .expect("failed to write cut-every setting");
+    }
 
     let feed_buf = opts.feed.to_le_bytes();
     out_buffy.write_all(&[ESC, b'i', b'd', feed_buf[0], feed_buf[1]])
