@@ -65,6 +65,16 @@ struct Opts {
     #[arg(short = 'w', long)]
     pub width_mm: u8,
 
+    #[arg(
+        short = '2',
+        long,
+        help = concat!(
+            "Whether the last page of the label is announced with the page value 2 instead of 1.",
+            " (This is e.g. true on PT-P950NW and false on PT-E550W.)"
+        ),
+    )]
+    pub last_page_2: bool,
+
     #[arg(required = true)]
     pub png_paths: Vec<PathBuf>,
 
@@ -277,7 +287,7 @@ if let CutEvery::Every(cut_every) = opts.cut_every {
         .expect("failed to write compression instruction");
 
     for (page_index, page_rows) in pages.iter().enumerate() {
-        let page_byte = if page_index == pages.len() - 1 {
+        let page_byte = if page_index == pages.len() - 1 && opts.last_page_2 {
             // last (or single) page
             2
         } else if page_index == 0 {
